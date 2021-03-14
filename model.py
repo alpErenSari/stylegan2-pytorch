@@ -637,7 +637,7 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], patch_number=16):
         super().__init__()
 
         channels = {
@@ -676,6 +676,11 @@ class Discriminator(nn.Module):
             EqualLinear(channels[4], 1),
         )
 
+        self.conditional_linear = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+            EqualLinear(channels[4], patch_number),
+        )
+
     def forward(self, input):
         out = self.convs(input)
 
@@ -692,7 +697,7 @@ class Discriminator(nn.Module):
         out = self.final_conv(out)
 
         out = out.view(batch, -1)
-        out = self.final_linear(out)
+        score = self.final_linear(out)
+        class_pred = self.conditional_linear(out)
 
-        return out
-
+        return score, class_pred

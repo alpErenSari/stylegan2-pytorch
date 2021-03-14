@@ -127,6 +127,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
     loader = sample_data(loader)
 
     pbar = range(args.iter)
+    embedding = nn.Embedding(16, args.latent).to(device)
+    aux_loss_fn = nn.CrossEntropyLoss().to(device)
 
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
@@ -166,13 +168,17 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
             break
 
-        real_img = next(loader)[0]
+        real_img, pos_label = next(loader)
         real_img = real_img.to(device)
+        pos_label = pos_label.to(device)
+        gen_label = torch.randint_like(pos_label, 0, args.patch_number)
+        gen_label_emb = embedding(gen_label).detach()
 
         requires_grad(generator, False)
         requires_grad(discriminator, True)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        noise = [cur_noise.mul(gen_label_emb) for cur_noise in noise]
 
         fake_img, _ = generator(noise)
 
@@ -183,9 +189,12 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         else:
             real_img_aug = real_img
 
-        fake_pred,_ = discriminator(fake_img)
-        real_pred,_ = discriminator(real_img_aug)
-        d_loss = d_logistic_loss(real_pred, fake_pred)
+        fake_pred, fake_aux = discriminator(fake_img)
+        real_pred, real_aux = discriminator(real_img_aug)
+        d_loss = 0.5 * d_logistic_loss(real_pred, fake_pred) + \
+                        0.25 * aux_loss_fn(fake_aux, gen_label) + \
+                        0.25 * aux_loss_fn(real_aux, pos_label)
+
 
         loss_dict["d"] = d_loss
         loss_dict["real_score"] = real_pred.mean()
@@ -210,7 +219,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             else:
                 real_img_aug = real_img
 
-            real_pred,_ = discriminator(real_img_aug)
+            real_pred, real_aux = discriminator(real_img_aug)
             r1_loss = d_r1_loss(real_pred, real_img)
 
             discriminator.zero_grad()
@@ -224,13 +233,14 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(discriminator, False)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        noise = [cur_noise.mul(gen_label_emb) for cur_noise in noise]
         fake_img, _ = generator(noise)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
 
-        fake_pred,_ = discriminator(fake_img)
-        g_loss = g_nonsaturating_loss(fake_pred)
+        fake_pred, fake_aux = discriminator(fake_img)
+        g_loss = (g_nonsaturating_loss(fake_pred) + aux_loss_fn(fake_aux, gen_label)) / 2.0
 
         loss_dict["g"] = g_loss
 
@@ -309,10 +319,10 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
                         sample,
-                        f"sample/{str(i).zfill(6)}.png",
+                        f"experiments/sample/{str(i).zfill(6)}.png",
                         nrow=int(args.n_sample ** 0.5),
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
 
             if i % 10000 == 0:
@@ -326,7 +336,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                     },
-                    f"checkpoint/{str(i).zfill(6)}.pt",
+                    f"experiments/checkpoint/{str(i).zfill(6)}.pt",
                 )
 
 
@@ -444,6 +454,8 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
+    args.embedding_dim = 32
+    args.patch_number = (64 // args.size) ** 2
 
     args.start_iter = 0
 
@@ -457,7 +469,7 @@ if __name__ == "__main__":
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
     ).to(device)
     discriminator = Discriminator(
-        args.size, channel_multiplier=args.channel_multiplier
+        args.size, channel_multiplier=args.channel_multiplier, patch_number=args.patch_number
     ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier

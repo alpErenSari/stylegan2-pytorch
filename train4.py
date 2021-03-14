@@ -127,6 +127,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
     loader = sample_data(loader)
 
     pbar = range(args.iter)
+    embedding = nn.Embedding(args.patch_number, args.embedding_dim).to(device)
 
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
@@ -166,13 +167,16 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
             break
 
-        real_img = next(loader)[0]
+        real_img, pos_label = next(loader)
         real_img = real_img.to(device)
+        pos_label = pos_label.to(device)
+        pos_label_emb = embedding(pos_label).detach()
 
         requires_grad(generator, False)
         requires_grad(discriminator, True)
 
-        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        noise = mixing_noise(args.batch, args.latent-args.embedding_dim, args.mixing, device)
+        noise = [torch.cat([cur_noise, pos_label_emb], dim=1) for cur_noise in noise]
 
         fake_img, _ = generator(noise)
 
@@ -183,8 +187,8 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         else:
             real_img_aug = real_img
 
-        fake_pred,_ = discriminator(fake_img)
-        real_pred,_ = discriminator(real_img_aug)
+        fake_pred, _ = discriminator(fake_img)
+        real_pred, _ = discriminator(real_img_aug)
         d_loss = d_logistic_loss(real_pred, fake_pred)
 
         loss_dict["d"] = d_loss
@@ -223,13 +227,15 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         requires_grad(generator, True)
         requires_grad(discriminator, False)
 
-        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        noise = mixing_noise(args.batch, args.latent-args.embedding_dim, args.mixing, device)
+        noise = [torch.cat([cur_noise, pos_label_emb], dim=1) for cur_noise in noise]
+
         fake_img, _ = generator(noise)
 
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
 
-        fake_pred,_ = discriminator(fake_img)
+        fake_pred, _ = discriminator(fake_img)
         g_loss = g_nonsaturating_loss(fake_pred)
 
         loss_dict["g"] = g_loss
@@ -309,7 +315,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
                         sample,
-                        f"sample/{str(i).zfill(6)}.png",
+                        f"experiments_3/sample/{str(i).zfill(6)}.png",
                         nrow=int(args.n_sample ** 0.5),
                         normalize=True,
                         range=(-1, 1),
@@ -326,7 +332,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                     },
-                    f"checkpoint/{str(i).zfill(6)}.pt",
+                    f"experiments_3/checkpoint/{str(i).zfill(6)}.pt",
                 )
 
 
@@ -444,6 +450,8 @@ if __name__ == "__main__":
 
     args.latent = 512
     args.n_mlp = 8
+    args.embedding_dim = 32
+    args.patch_number = (64 // args.size) ** 2
 
     args.start_iter = 0
 
